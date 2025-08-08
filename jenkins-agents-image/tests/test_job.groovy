@@ -1,0 +1,1 @@
+println "Hello from Groovy CLI script executed on Jenkins at ${new Date()}"

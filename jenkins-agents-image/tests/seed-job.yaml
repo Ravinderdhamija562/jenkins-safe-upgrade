@@ -1,0 +1,33 @@
+// Jenkinsfile for the Job-Generator-Seed job
+pipeline {
+    agent any
+    options {
+        skipDefaultCheckout(true) // We will do a custom checkout
+    }
+    stages {
+        stage('Checkout Job Definitions') {
+            steps {
+                script {
+                    // Clone your jenkins-job-definitions repository
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: 'main']], // Or your default branch
+                        userRemoteConfigs: [[url: 'https://github.com/your-org/jenkins-job-definitions.git', credentialsId: 'your-seed-repo-creds-id']], // If your seed repo is private
+                        extensions: [[$class: 'CleanBeforeCheckout']] // Clean workspace before checkout
+                    ])
+                }
+            }
+        }
+        stage('Generate Jobs') {
+            steps {
+                script {
+                    // Execute the Job DSL script found in the checked-out repository
+                    jobDsl script: file('generate_pipelines.groovy'), sandbox: true
+                    // 'sandbox: true' is default and recommended for security.
+                    // If you need more advanced Groovy features that sandbox restricts,
+                    // you might need to approve methods in "In-process Script Approval".
+                }
+            }
+        }
+    }
+}

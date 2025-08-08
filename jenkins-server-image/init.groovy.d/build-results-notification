@@ -1,0 +1,58 @@
+[
+    name: 'Send build result notification to slack channel',
+    script: '''
+        pipeline {
+            agent any
+            environment {
+                SLACK_CHANNEL = 'secondary-alerts'
+            }
+            stages {
+                stage('Read File from Jenkins Home') {
+                    steps {
+                        script {
+                            def jenkinsHome = env.JENKINS_HOME
+                            def image = env.IMAGE
+
+                            def fileContent = readFile("${jenkinsHome}/build_results.txt")
+                                                // Initialize variables
+                            def lines = fileContent.split("\\n")
+                            def passedCount = 0
+                            def failedCount = 0
+                            def totalCount = lines.size()
+
+                            // Determine column widths
+                            def maxJobLength = 30
+                            def maxStatusLength = "Status".length()
+                            // Build table headers and separator
+                            def formattedTable = "Job".padRight(maxJobLength + 2) + " Status\\n"
+                            formattedTable += "-----------------------------------------" + "\\n"
+
+                            // Parse the file content and build the table
+                            lines.each { line ->
+                                def (job, status) = line.split(": ")
+                                if (status == "SUCCESS") {
+                                    passedCount++
+                                } else {
+                                    failedCount++
+                                }
+                                formattedTable += "${job.padRight(maxJobLength + 2)} ${status}\\n"
+                            }
+
+                            // Calculate summary
+                            def summary = "Passed: ${passedCount}/${totalCount}, Failed: ${failedCount}/${totalCount}"
+
+                            // Construct final message
+                            def msg = """* Custom Jenkins image:`${image}` Test Result:*
+${summary}
+
+```${formattedTable}```
+
+"""
+                            slackSend color : '#3ad94c', channel: env.SLACK_CHANNEL, message: msg
+                        }
+                    }
+                }
+            }
+        }
+    '''
+]

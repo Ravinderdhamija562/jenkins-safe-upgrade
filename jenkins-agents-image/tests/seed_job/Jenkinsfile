@@ -1,0 +1,48 @@
+@Library('ns_pipeline_library')_
+
+
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+import org.jsoup.nodes.Element;
+import org.jsoup.parser.Tag;
+
+pipeline {
+    agent {
+        label 'MASTER'
+    }
+    options {
+        skipDefaultCheckout(true) // We will do a custom checkout in the stage
+    }
+    stages {
+        stage('Checkout Job Definitions Repository') {
+            steps {
+                script {
+                  ns_pipeline.git_check_out("https://github.com/company/<repository>.git", "pr/EP-65900/test-packer-image", true, false, 120, false, "github-https")
+                }
+            }
+        }
+        stage('Find Actual Workspace Path') { // <--- ADD THIS STAGE TEMPORARILY
+            steps {
+                script {
+                    def currentWorkspace = pwd() // This 'pwd()' is a Pipeline step and should work here
+                    echo "!!! ACTUAL JENKINS WORKSPACE PATH: ${currentWorkspace} !!!"
+                    // You can also list contents to confirm it:
+                    // sh 'ls -R'
+                }
+            }
+        }
+
+        stage('Generate Jobs with Job DSL') {
+            steps {
+                script {
+                    // Execute the Job DSL script found in the checked-out repository
+                    //jobDsl script: file('generate_pipelines.groovy'), sandbox: true
+                    jobDsl(targets: 'Jenkins/jenkins-agents-image/tests/generate_pipelines.groovy')
+                    // 'sandbox: true' is recommended for security. If you use advanced Groovy
+                    // or Jenkins API calls, you might need to approve methods in
+                    // "Manage Jenkins" -> "In-process Script Approval".
+                }
+            }
+        }
+    }
+}

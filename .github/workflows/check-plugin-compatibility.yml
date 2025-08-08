@@ -1,0 +1,63 @@
+name: Check plugin compatibility
+
+on:
+  pull_request:
+    branches:
+      - develop
+
+jobs:
+  check_plugin_compatibility:
+    runs-on: arc-default-basic-cheap-xs-set
+
+    env:
+      SCRIPT: "jenkins-lts/scripts/check-plugin-compatibility.py"
+      JENKINS_VERSION: "2.462.1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9 # v3.5.3
+        with:
+          fetch-depth: 0  # Ensure full history is available
+
+      - name: Get changed plugins
+        run: |
+          FILE_TO_CHECK="jenkins-lts/image/plugins.txt"
+
+          MODIFIED_PLUGINS=$(git diff ${{ github.event.pull_request.base.sha }} ${{ github.sha }} -- $FILE_TO_CHECK | grep '^\+[^+]' | sed 's/^\+//')
+
+          # Check if MODIFIED_PLUGINS is not empty before setting it
+          if [ -n "$MODIFIED_PLUGINS" ]; then
+            echo "MODIFIED_PLUGINS<<EOF" >> $GITHUB_ENV
+            echo "$MODIFIED_PLUGINS" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+          else
+            echo "No modifications found."
+          fi
+
+      - name: Display changed lines
+        run: |
+          echo "$MODIFIED_PLUGINS"
+
+      - name: Check modified plugins compatibility
+        run: |
+          pip install requests==2.32.3
+          isCompatible="None"
+          FAILED_PLUGINS=()
+
+          for plugin_with_version in $MODIFIED_PLUGINS; do
+            pluginName=$(echo "$plugin_with_version" | awk -F":" '{print $1}')
+            pluginVersion=$(echo "$plugin_with_version" | awk -F":" '{print $2}')
+
+            echo "Checking $pluginName:$pluginVersion"
+
+            isCompatible=$(python "$SCRIPT" --plugin-name "$pluginName" --plugin-version "$pluginVersion" --jenkins-version "$JENKINS_VERSION" 2>/dev/null)
+            if [[ "$isCompatible" == "False" || "$isCompatible" == "None" ]]; then
+              echo "Error: Plugin:$plugin is not compatible with $JENKINS_VERSION"
+              FAILED_PLUGINS+=("$plugin")
+            fi
+          done
+
+          if [ ${#FAILED_PLUGINS[@]} -gt 0 ]; then
+            echo "FAILED_PLUGINS: ${FAILED_PLUGINS[@]}"
+            exit 1
+          fi

@@ -1,0 +1,16 @@
+{
+  "jobName": "test-pipeline1",
+  "description": "Build pipeline for the test pipeline1 application",
+  "gitRepo": "<git_repo_url>",
+  "gitBranch": "develop",
+  "jenkinsfilePath": "Jenkinsfile",
+  "credentialsId": "github-https",
+  "parameters": [
+    {
+      "name": "BUILD_ENV",
+      "type": "string",
+      "defaultValue": "dev",
+      "description": "Environment to build for"
+    }
+  ]
+}

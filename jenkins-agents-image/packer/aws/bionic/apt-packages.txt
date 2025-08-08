@@ -1,0 +1,25 @@
+libz-dev
+libssl-dev
+gettext
+libcurl4-openssl-dev
+libexpat1-dev
+build-essential
+autoconf
+dh-autoreconf
+sshpass
+git
+default-jre perl
+rpm
+cmake
+libxml-simple-perl
+build-essential
+libkeyutils-dev
+libc-ares-dev
+libnetfilter-queue-dev
+libgtk-3-dev
+libappindicator3-dev
+gir1.2-appindicator3-0.1
+libwebkit2gtk-4.0-dev
+dpkg-sig
+libpcap-dev
+asciidoc

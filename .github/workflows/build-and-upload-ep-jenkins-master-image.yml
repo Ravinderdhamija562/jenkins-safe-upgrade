@@ -1,0 +1,264 @@
+name: Build and upload ep-jenkins-master image
+
+on:
+  push:
+    branches:
+      - develop
+    paths:
+      - 'Jenkins/jenkins-lts/image/Dockerfile'
+      - 'Jenkins/jenkins-lts/image/entrypoint.sh'
+      - 'Jenkins/jenkins-lts/image/plugins.txt'
+
+  workflow_dispatch:
+
+env:
+  ARTIFACTORY_URL: artifactory.company.io
+  ARTIFACTORY_REPOSITORY: ep-tools-docker
+  ARTIFACTORY_IMAGE_NAME: ep-jenkins-master
+  IMAGE_PATH: "Jenkins/jenkins-lts/image"
+  VAULT_NAMESPACE: 'nonprod'
+  VAULT_PATH: 'secrets/generic/global/data/ep-jenkins/creds'
+  APPROVERS: '<issue_approvers>'
+  SLACK_CHANNEL_ID: "<slack_channel_id>" #secondary-alerts
+
+jobs:
+  build_and_upload_jenkins_image:
+    runs-on: arc-default-basic-sturdy-xs-set
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9 # v3.5.3
+
+      - name: Install ep-versioner
+        id: ep_versioner
+        run: |
+          curl -s https://artifactory-rd.company.io/artifactory/ep-tools/ep-versioner/"$EP_VERSIONER_VERSION"/linux_x86_64/ep-versioner -o ep-versioner
+          chmod +x ep-versioner
+          echo "VERSION=$(./ep-versioner calc -d)" >> $GITHUB_ENV
+          echo $VERSION
+        env:
+          EP_VERSIONER_VERSION: '24.83.203'
+
+      - name: Log in to Artifactory
+        run: echo "${{ secrets.NS_ARTIFACTORY_PASSWORD }}" | docker login ${{ env.ARTIFACTORY_URL }} -u ${{ secrets.NS_ARTIFACTORY_USER }} --password-stdin
+
+      - name: Build Docker image
+        run: docker build -t ${{ env.ARTIFACTORY_URL }}/${{ env.ARTIFACTORY_REPOSITORY }}/${{ env.ARTIFACTORY_IMAGE_NAME }}:$VERSION -f ${{ env.IMAGE_PATH }}/Dockerfile ${{ env.IMAGE_PATH }}
+
+      - name: Push Docker image to Artifactory
+        run: docker push ${{ env.ARTIFACTORY_URL }}/${{ env.ARTIFACTORY_REPOSITORY }}/${{ env.ARTIFACTORY_IMAGE_NAME }}:$VERSION
+
+      - name: Send image push notification to Slack
+        env:
+          BOT_TOKEN: ${{ secrets.SLACK_TOKEN }}
+        run: |
+          MESSAGE=":bell: Image:*${{ env.ARTIFACTORY_URL }}/${{ env.ARTIFACTORY_REPOSITORY }}/${{ env.ARTIFACTORY_IMAGE_NAME }}:$VERSION pushed successfully*\n\n"
+
+          payload=$(cat <<EOF
+          {
+              "channel": "$SLACK_CHANNEL_ID",
+              "text": "$MESSAGE"
+          }
+          EOF
+          )
+          response=$(curl -s -X POST -H "Authorization: Bearer $BOT_TOKEN" -H "Content-type: application/json" \
+              --data "$payload" \
+              https://slack.com/api/chat.postMessage)
+
+      - name: Create Release tag
+        run: |
+          gh release create $VERSION --generate-notes --target $GITHUB_SHA --title $VERSION
+        env:
+          GH_TOKEN: ${{secrets.BOT_TOKEN}}
+      - name: Create github issue for GKE-CISYSTEM-BETA jenkins upgrade
+        env:
+          GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          APPROVERS: ${{ env.APPROVERS }}
+          JENKINS_INSTANCE: "GKE-CISYSTEM-BETA"
+          RELEASE_NAME: 'jenkins'
+          CHART_NAME: 'jenkins/jenkins'
+          CHART_VERSION: '4.12.1'
+          OVERRRIDE_VALUES_FILE: 'gke-cisystem-beta-values.yaml'
+          TARGET_CLUSTER_NAME: 'test-gke-jenkins-cluster-1'
+          TARGET_CLUSTER_PROJECT: 'ns-cicd'
+          TARGET_CLUSTER_REGION: 'us-west1'
+          NAMESPACE: 'jenkins-lts'
+        run: |
+          RELEASE_TAG="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/tag/${{ env.VERSION }}"
+          ISSUE_TITLE="Jenkins:\`${{ env.JENKINS_INSTANCE }}\` upgrade with image:\`${{ env.VERSION }}\`"
+          ISSUE_BODY="## Approving the issue will trigger jenkins upgrade immediately.\nJenkins will be upgraded with below parameters.Please approve or deny the upgrade.\n"
+
+          ISSUE_BODY+="\nimage_tag:\`$VERSION\`"
+          ISSUE_BODY+="\nrelease_name:\`$RELEASE_NAME\`"
+          ISSUE_BODY+="\nchart_name:\`$CHART_NAME\`"
+          ISSUE_BODY+="\nchart_version:\`$CHART_VERSION\`"
+          ISSUE_BODY+="\noverride_values_file:\`$OVERRRIDE_VALUES_FILE\`"
+          ISSUE_BODY+="\ntarget_cluster_name:\`$TARGET_CLUSTER_NAME\`"
+          ISSUE_BODY+="\ntarget_cluster_project:\`$TARGET_CLUSTER_PROJECT\`"
+          ISSUE_BODY+="\ntarget_cluster_region:\`$TARGET_CLUSTER_REGION\`"
+          ISSUE_BODY+="\nnamespace:\`$NAMESPACE\`"
+
+          ISSUE_BODY+="\n\nRequired approvers - \`${APPROVERS}\`\n"
+          ISSUE_BODY+="Release Tag - [$VERSION](${RELEASE_TAG})\n"
+
+          ISSUE_BODY+="\n\nComment 'approved', 'approve', 'lgtm', 'yes' to continue workflow or 'denied', 'deny', 'no' to cancel.\n"
+
+          ASSIGNEES_ARRAY=$(echo "${APPROVERS}" | tr ',' '\n' | jq -R . | jq -s .)
+
+          RESPONSE=$(curl -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues \
+            -d '{
+                  "title": "'"${ISSUE_TITLE}"'",
+                  "body": "'"${ISSUE_BODY}"'",
+                  "assignees": '"${ASSIGNEES_ARRAY}"',
+                  "labels": ["jenkins","upgrade"]
+                }')
+          echo "Response: $RESPONSE"
+          ISSUE_NUMBER=$(echo "$RESPONSE" | jq '.number')
+          echo "Issue Number: $ISSUE_NUMBER"
+          ISSUE_URL1="https://github.com/${REPO_OWNER}/${REPO_NAME}/issues/$ISSUE_NUMBER"
+          echo "Issue URL: $ISSUE_URL1"
+          echo "ISSUE_URL1=$ISSUE_URL1" >> $GITHUB_ENV
+
+      - name: Create github issue for GKE-CISYSTEM jenkins upgrade
+        env:
+          GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          APPROVERS: ${{ env.APPROVERS }}
+          JENKINS_INSTANCE: "GKE-CISYSTEM"
+          RELEASE_NAME: 'jenkins'
+          CHART_NAME: 'jenkins/jenkins'
+          CHART_VERSION: '4.12.1'
+          OVERRRIDE_VALUES_FILE: 'gke-cisystem-values.yaml'
+          TARGET_CLUSTER_NAME: 'gke-jenkins-cisystem-cluster'
+          TARGET_CLUSTER_PROJECT: 'ns-cicd'
+          TARGET_CLUSTER_REGION: 'us-west1'
+          NAMESPACE: 'jenkins-lts'
+        run: |
+          RELEASE_TAG="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/tag/${{ env.VERSION }}"
+          ISSUE_TITLE="Jenkins:\`${{ env.JENKINS_INSTANCE }}\` upgrade with image:\`${{ env.VERSION }}\`"
+          ISSUE_BODY="## Approving the issue will trigger jenkins upgrade immediately.\nJenkins will be upgraded with below parameters.Please approve or deny the upgrade.\n"
+
+          ISSUE_BODY+="\nimage_tag:\`$VERSION\`"
+          ISSUE_BODY+="\nrelease_name:\`$RELEASE_NAME\`"
+          ISSUE_BODY+="\nchart_name:\`$CHART_NAME\`"
+          ISSUE_BODY+="\nchart_version:\`$CHART_VERSION\`"
+          ISSUE_BODY+="\noverride_values_file:\`$OVERRRIDE_VALUES_FILE\`"
+          ISSUE_BODY+="\ntarget_cluster_name:\`$TARGET_CLUSTER_NAME\`"
+          ISSUE_BODY+="\ntarget_cluster_project:\`$TARGET_CLUSTER_PROJECT\`"
+          ISSUE_BODY+="\ntarget_cluster_region:\`$TARGET_CLUSTER_REGION\`"
+          ISSUE_BODY+="\nnamespace:\`$NAMESPACE\`"
+
+          ISSUE_BODY+="\n\nRequired approvers - \`${APPROVERS}\`\n"
+          ISSUE_BODY+="Release Tag - [$VERSION](${RELEASE_TAG})\n"
+
+          ISSUE_BODY+="\n\nComment 'approved', 'approve', 'lgtm', 'yes' to continue workflow or 'denied', 'deny', 'no' to cancel.\n"
+
+          ASSIGNEES_ARRAY=$(echo "${APPROVERS}" | tr ',' '\n' | jq -R . | jq -s .)
+
+          RESPONSE=$(curl -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues \
+            -d '{
+                  "title": "'"${ISSUE_TITLE}"'",
+                  "body": "'"${ISSUE_BODY}"'",
+                  "assignees": '"${ASSIGNEES_ARRAY}"',
+                  "labels": ["jenkins","upgrade"]
+                }')
+          echo "Response: $RESPONSE"
+          ISSUE_NUMBER=$(echo "$RESPONSE" | jq '.number')
+          echo "Issue Number: $ISSUE_NUMBER"
+          ISSUE_URL2="https://github.com/${REPO_OWNER}/${REPO_NAME}/issues/$ISSUE_NUMBER"
+          echo "Issue URL: $ISSUE_URL2"
+          echo "ISSUE_URL2=$ISSUE_URL2" >> $GITHUB_ENV
+
+      - name: Create github issue for ci-feature jenkins upgrade
+        env:
+          GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          APPROVERS: ${{ env.APPROVERS }}
+          JENKINS_INSTANCE: "CI-FEATURE"
+          RELEASE_NAME: 'jenkins'
+          CHART_NAME: 'jenkins/jenkins'
+          CHART_VERSION: '4.12.1'
+          OVERRRIDE_VALUES_FILE: 'gke-ci-feature-values.yaml'
+          TARGET_CLUSTER_NAME: 'gke-jenkins-cisystem-cluster'
+          TARGET_CLUSTER_PROJECT: 'ns-cicd'
+          TARGET_CLUSTER_REGION: 'us-west1'
+          NAMESPACE: 'jenkins-ci-feature'
+        run: |
+          RELEASE_TAG="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/tag/${{ env.VERSION }}"
+          ISSUE_TITLE="Jenkins:\`${{ env.JENKINS_INSTANCE }}\` upgrade with image:\`${{ env.VERSION }}\`"
+          ISSUE_BODY="## Approving the issue will trigger jenkins upgrade immediately.\nJenkins will be upgraded with below parameters.Please approve or deny the upgrade.\n"
+
+          ISSUE_BODY+="\nimage_tag:\`$VERSION\`"
+          ISSUE_BODY+="\nrelease_name:\`$RELEASE_NAME\`"
+          ISSUE_BODY+="\nchart_name:\`$CHART_NAME\`"
+          ISSUE_BODY+="\nchart_version:\`$CHART_VERSION\`"
+          ISSUE_BODY+="\noverride_values_file:\`$OVERRRIDE_VALUES_FILE\`"
+          ISSUE_BODY+="\ntarget_cluster_name:\`$TARGET_CLUSTER_NAME\`"
+          ISSUE_BODY+="\ntarget_cluster_project:\`$TARGET_CLUSTER_PROJECT\`"
+          ISSUE_BODY+="\ntarget_cluster_region:\`$TARGET_CLUSTER_REGION\`"
+          ISSUE_BODY+="\nnamespace:\`$NAMESPACE\`"
+
+          ISSUE_BODY+="\n\nRequired approvers - \`${APPROVERS}\`\n"
+          ISSUE_BODY+="Release Tag - [$VERSION](${RELEASE_TAG})\n"
+
+          ISSUE_BODY+="\n\nComment 'approved', 'approve', 'lgtm', 'yes' to continue workflow or 'denied', 'deny', 'no' to cancel.\n"
+
+          ASSIGNEES_ARRAY=$(echo "${APPROVERS}" | tr ',' '\n' | jq -R . | jq -s .)
+
+          RESPONSE=$(curl -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues \
+            -d '{
+                  "title": "'"${ISSUE_TITLE}"'",
+                  "body": "'"${ISSUE_BODY}"'",
+                  "assignees": '"${ASSIGNEES_ARRAY}"',
+                  "labels": ["jenkins","upgrade"]
+                }')
+          echo "Response: $RESPONSE"
+          ISSUE_NUMBER=$(echo "$RESPONSE" | jq '.number')
+          echo "Issue Number: $ISSUE_NUMBER"
+          ISSUE_URL3="https://github.com/${REPO_OWNER}/${REPO_NAME}/issues/$ISSUE_NUMBER"
+          echo "Issue URL: $ISSUE_URL3"
+          echo "ISSUE_URL3=$ISSUE_URL3" >> $GITHUB_ENV
+
+      - name: Send notification to Slack
+        env:
+          BOT_TOKEN: ${{ secrets.SLACK_TOKEN }}
+        run: |
+          MESSAGE=":bell: *Jenkins Upgrade Approval Needed*\n\n"
+          MESSAGE+="Please review and either approve or deny the GitHub issues created for the upgrade. You can find the details of each issue below:\n\n"
+          MESSAGE+="• <$ISSUE_URL1|GKE-CISYSTEM-BETA Upgrade>\n"
+          MESSAGE+="• <$ISSUE_URL2|GKE-CISYSTEM Upgrade>\n"
+          MESSAGE+="• <$ISSUE_URL3|CI-FEATURE Upgrade>\n"
+
+          MESSAGE+="\nPlease ensure to address all the listed issues."
+
+          # JSON payload
+          payload=$(cat <<EOF
+          {
+              "channel": "$SLACK_CHANNEL_ID",
+              "text": "$MESSAGE"
+          }
+          EOF
+          )
+          # Send message using curl
+          response=$(curl -s -X POST -H "Authorization: Bearer $BOT_TOKEN" -H "Content-type: application/json" \
+              --data "$payload" \
+              https://slack.com/api/chat.postMessage)
+          # Check for successful response
+          if echo "$response" | grep -q '"ok":true'; then
+              echo "Message sent to slack successfully"
+          else
+              echo "Failed to send message: $response"
+          fi

@@ -1,0 +1,14 @@
+[Unit]
+Description=Jenkins CloudWatch Config Updater from Workspace
+After=network-online.target multi-user.target
+
+[Service]
+Type=oneshot # This means the service runs once and then exits.
+ExecStartPre=/bin/bash -c "until ls /home/nsadmin/workspace/*/ 2>/dev/null; do echo 'Waiting for Jenkins workspace...'; sleep 5; done"
+ExecStart=/opt/aws/amazon-cloudwatch-agent/bin/update_cw_config.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

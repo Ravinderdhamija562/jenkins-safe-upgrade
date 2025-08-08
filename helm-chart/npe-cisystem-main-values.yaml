@@ -1,0 +1,282 @@
+#References
+# https://github.com/jenkinsci/helm-charts/blob/jenkins-5.8.69/charts/jenkins/values.yaml
+controller:
+  image:
+    registry: "<image-registry>"
+    repository: "<image_repository>"
+    tag: 25.84.201 #last working image 25.83.13
+  nodeSelector:
+    nodepool: npe-cisystem-main
+  tolerations:
+    - key: "nodepool"
+      operator: "Equal"
+      value: "npe-cisystem-main"
+      effect: "NoSchedule"
+  resources:
+    requests:
+      cpu: "6000m"
+      memory: "24Gi"
+    limits:
+      cpu: "20000m"
+      memory: "60Gi"
+  usePodSecurityContext: true
+  podSecurityContextOverride:
+    fsGroup: 1000
+    runAsUser: 1000
+  containerSecurityContext:
+    runAsUser: 1000
+    allowPrivilegeEscalation: true
+  # Debugging jenkins controller
+  jenkinsOpts:
+    -Djenkins.model.Jenkins.logLevel=all
+  probes:
+    livenessProbe:
+      initialDelaySeconds: 60
+      timeoutSeconds: 5
+      periodSeconds: 10
+      failureThreshold: 60
+    startupProbe:
+      initialDelaySeconds: 60
+      timeoutSeconds: 5
+      periodSeconds: 10
+      failureThreshold: 60
+  agentListenerEnabled: false
+
+  # List of plugins to be install during Jenkins controller start
+  installPlugins: false
+  #  - configuration-as-code:1670.v564dc8b_982d0
+  # Set to false to download the minimum required version of all dependencies.
+  installLatestPlugins: false
+
+  # Set to true to download latest dependencies of any plugin that is requested to have the latest version.
+  installLatestSpecifiedPlugins: false
+
+  # Enable to initialize the Jenkins controller only once on initial installation.
+  # Without this, whenever the controller gets restarted (Evicted, etc.) it will fetch plugin updates which has the potential to cause breakage.
+  # Note that for this to work, `persistence.enabled` needs to be set to `true`
+  initializeOnce: false
+
+  # Enable to always override the installed plugins with the values of 'controller.installPlugins' on upgrade or redeployment.
+  overwritePlugins: false
+
+  # Configures if plugins bundled with `controller.image` should be overwritten with the values of 'controller.installPlugins' on upgrade or redeployment.
+  overwritePluginsFromImage: false
+
+  # List of plugins to install in addition to those listed in controller.installPlugins
+  additionalPlugins: []
+
+  ingress:
+    enabled: true
+    # Override for the default paths that map requests to the backend
+    paths: []
+    # - backend:
+    #     serviceName: ssl-redirect
+    #     servicePort: use-annotation
+    # - backend:
+    #     serviceName: >-
+    #       {{ template "jenkins.fullname" . }}
+    #     # Don't use string here, use only integer value!
+    #     servicePort: 8080
+    # For Kubernetes v1.14+, use 'networking.k8s.io/v1beta1'
+    # For Kubernetes v1.19+, use 'networking.k8s.io/v1'
+    apiVersion: "extensions/v1beta1"
+    labels: {}
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: 2g
+    # kubernetes.io/ingress.class: nginx
+    # kubernetes.io/tls-acme: "true"
+    # For Kubernetes >= 1.18 you should specify the ingress-controller via the field ingressClassName
+    # See https://kubernetes.io/blog/2020/04/02/improvements-to-the-ingress-api-in-kubernetes-1.18/#specifying-the-class-of-an-ingress
+    ingressClassName: nginx
+    # Set this path to jenkinsUriPrefix above or use annotations to rewrite path
+    # path: "/jenkins"
+    # configures the hostname e.g. jenkins.example.com
+    hostName: npe-cisystem.company.io
+    tls:
+    - secretName: jenkins-tls-mar26
+      hosts:
+        - npe-cisystem.company.io
+
+  # Expose Prometheus metrics
+  prometheus:
+    # If enabled, add the prometheus plugin to the list of plugins to install
+    # https://plugins.jenkins.io/prometheus
+    enabled: false
+
+  # Below is the implementation of Jenkins Configuration as Code.  Add a key under configScripts for each configuration area,
+  # where each corresponds to a plugin or section of the UI.  Each key (prior to | character) is just a label, and can be any value.
+  # Keys are only used to give the section a meaningful name.  The only restriction is they may only contain RFC 1123 \ DNS label
+  # characters: lowercase letters, numbers, and hyphens.  The keys become the name of a configuration yaml file on the controller in
+  # /var/jenkins_home/casc_configs (by default) and will be processed by the Configuration as Code Plugin.  The lines after each |
+  # become the content of the configuration yaml file.  The first line after this is a JCasC root element, eg jenkins, credentials,
+  # etc.  Best reference is https://<jenkins_url>/configuration-as-code/reference.  The example below creates a welcome message:
+  JCasC:
+    defaultConfig: false
+    configUrls: []
+    # - https://acme.org/jenkins.yaml
+    # Remote URL:s for configuration files.
+    configScripts:
+      welcome-message: |
+        jenkins:
+          systemMessage: Welcome to EP Jenkins prod server in aws
+      cloud-configuration: |-
+        x-ec2_anchor: &ec2_anchor
+          description: "Common EC2 template"
+          amiType:
+            unixData:
+              sshPort: "22"
+          associatePublicIp: false
+          connectionStrategy: PRIVATE_IP
+          deleteRootOnTermination: false
+          ebsEncryptRootVolume: DEFAULT
+          ebsOptimized: false
+          hostKeyVerificationStrategy: 'OFF'
+          idleTerminationMinutes: "0"
+          iamInstanceProfile: "arn:aws:iam::156041411903:instance-profile/application_role/npe-cisystem-main-jenkins-agent-instance-profile"
+          javaPath: "java"
+          maxTotalUses: 1
+          metadataEndpointEnabled: true
+          metadataHopsLimit: 1
+          metadataSupported: true
+          metadataTokensRequired: false
+          minimumNumberOfInstances: 0
+          minimumNumberOfSpareInstances: 0
+          mode: EXCLUSIVE
+          monitoring: true
+          numExecutors: 1
+          remoteAdmin: "nsadmin"
+          remoteFS: "/home/nsadmin"
+          securityGroups: "sg-0646e547949539b77"
+          stopOnTerminate: false
+          subnetId: "subnet-0698ba4c6752d7b3c"
+          t2Unlimited: false
+          tenancy: Default
+          useEphemeralDevices: false
+          zone: "us-east-1-b"
+          tags:
+          - name: "created_by"
+            value: "npe-cisystem-main-ec2-plugin"
+
+        jenkins:
+          clouds:
+          - amazonEC2:
+              name: "vm-ns-aws-nonprod"
+              region: "us-east-1"
+              sshKeysCredentialsId: "nsadmin-jenkins-key"
+              instanceCapStr: "52"
+              useInstanceProfileForCredentials: false
+              templates:
+                - <<: *ec2_anchor
+                  description: "UB1604-M6a8xlarge    Labels- UB1604-LARGE UB16-LARGE"
+                  labelString: "UB1604-LARGE UB16-LARGE"
+                  ami: "ami-029fe4dcf73d9c72e" # company-jenkins-ubuntu-xenial-16.04-20250711-1323
+                  type: M6a8xlarge
+
+                - <<: *ec2_anchor
+                  description: "UB1604-M6a4xlarge    Labels- UB1604-MEDIUM UB16-MEDIUM"
+                  labelString: "UB1604-MEDIUM UB16-MEDIUM"
+                  ami: "ami-029fe4dcf73d9c72e" # company-jenkins-ubuntu-xenial-16.04-20250711-1323
+                  type: M6a4xlarge
+
+                - <<: *ec2_anchor
+                  description: "UB1604-M6a4xlarge    Labels- UB16-UT UB1604-MEDIUM-UT"
+                  labelString: "UB16-UT UB1604-MEDIUM-UT"
+                  ami: "ami-029fe4dcf73d9c72e" # company-jenkins-ubuntu-xenial-16.04-20250711-1323
+                  type: M6a4xlarge
+
+                - <<: *ec2_anchor
+                  description: "UB1604-M6a4xlarge    Labels- UB1604-XLARGE UB16-XLARGE"
+                  labelString: "UB1604-XLARGE UB16-XLARGE"
+                  ami: "ami-029fe4dcf73d9c72e" # company-jenkins-ubuntu-xenial-16.04-20250711-1323
+                  type: R6i16xlarge
+
+                - <<: *ec2_anchor
+                  description: "UB2004-M6a8xlarge    Labels- UB2004-LARGE UB20-LARGE"
+                  labelString: "UB2004-LARGE UB20-LARGE"
+                  ami: "ami-02678c1aa508454b8" # company-jenkins-ubuntu-20.04-20250602-0908
+                  type: M6a8xlarge
+
+                - <<: *ec2_anchor
+                  description: "UB2004-T3Medium    Labels- UB20-MISC MISC UB2004-MICRO UB20-MICRO MICRO"
+                  labelString: "UB20-MISC MISC UB2004-MICRO UB20-MICRO MICRO"
+                  ami: "ami-02678c1aa508454b8" # company-jenkins-ubuntu-20.04-20250602-0908
+                  type: T3Medium
+                  maxTotalUses: -1
+                  numExecutors: 4
+
+                - <<: *ec2_anchor
+                  description: "UB2004-M6a4xlarge    Labels- UB2004-MEDIUM UB20-MEDIUM GCE-REPORT-ANALYZER"
+                  labelString: "UB2004-MEDIUM UB20-MEDIUM GCE-REPORT-ANALYZER"
+                  ami: "ami-02678c1aa508454b8" # company-jenkins-ubuntu-20.04-20250602-0908
+                  type: M6a4xlarge
+
+                - <<: *ec2_anchor
+                  description: "UB2004-T4gMedium    Labels- UB2004-XLARGE UB20-XLARGE"
+                  labelString: "UB2004-XLARGE UB20-XLARGE"
+                  ami: "ami-02678c1aa508454b8" # company-jenkins-ubuntu-20.04-20250602-0908
+                  type: R6i16xlarge
+
+                - <<: *ec2_anchor
+                  description: "UB2004-M6a2xlarge    Labels- UB2004-MINI-CFW UB20-CFW ONE-CLICK-BUILD"
+                  labelString: "UB2004-MINI-CFW UB20-CFW ONE-CLICK-BUILD"
+                  ami: "ami-02678c1aa508454b8" # company-jenkins-ubuntu-20.04-20250602-0908
+                  type: M6a2xlarge
+
+                - <<: *ec2_anchor
+                  description: "UB1804-M6a2xlarge    Labels- UB1804-MINI-CLIENT UB18-CLIENT"
+                  labelString: "UB1804-MINI-CLIENT UB18-CLIENT"
+                  ami: "ami-02ef2332c09dbfec1" #company-jenkins-ubuntu-18.04-20250602-0839
+                  type: M6a2xlarge
+
+    security:
+      apiToken:
+        creationOfLegacyTokenEnabled: false
+        tokenGenerationOnCreationEnabled: false
+        usageStatisticsEnabled: true
+    # Ignored if securityRealm is defined in controller.JCasC.configScripts
+    securityRealm: |-
+      local:
+        allowsSignup: false
+        enableCaptcha: false
+        users:
+        - id: "${chart-admin-username}"
+          name: "Jenkins Admin"
+          password: "${chart-admin-password}"
+    # Ignored if authorizationStrategy is defined in controller.JCasC.configScripts
+    authorizationStrategy: |-
+      loggedInUsersCanDoAnything:
+        allowAnonymousRead: false
+
+agent:
+  websocket: true
+
+persistence:
+  enabled: true
+  ## A manually managed Persistent Volume and Claim
+  ## Requires persistence.enabled: true
+  ## If defined, PVC must be created manually before volume will be bound
+  existingClaim: "npe-cisystem-main-pvc"
+  ## jenkins data Persistent Volume Storage Class
+  ## If defined, storageClassName: <storageClass>
+  ## If set to "-", storageClassName: "", which disables dynamic provisioning
+  ## If undefined (the default) or set to null, no storageClassName spec is
+  ##   set, choosing the default provisioner.  (gp2 on AWS, standard on
+  ##   GKE, AWS & OpenStack)
+  ##
+  storageClass:
+  annotations: {}
+  labels: {}
+  accessMode: "ReadWriteOnce"
+  size: "8Gi"
+  # Existing data source to clone PVC from
+  # ref: https://kubernetes.io/docs/concepts/storage/volume-pvc-datasource/
+  dataSource:
+  #   name: PVC-NAME
+  #   kind: PersistentVolumeClaim
+  volumes:
+  #  - name: nothing
+  #    emptyDir: {}
+  mounts:
+  #  - mountPath: /var/nothing
+  #    name: nothing
+  #    readOnly: true

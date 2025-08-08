@@ -1,0 +1,279 @@
+name: Comment jenkins upgrade issue
+
+on:
+  issue_comment:
+    types: [created, edited]
+env:
+  APPROVERS: '<issue_approvers>'
+  APPROVE_KEYWORDS: 'yes|lgtm|approve|approved'
+  DENY_KEYWORDS: 'no|deny|denied'
+  PROD_UPGRADE_REQ_LABEL: 'jenkins-beta-upgraded-already'
+  GITHUB_TOKEN_USER: 'cicd-bot'
+
+jobs:
+  comment_jenkins_upgrade_issue:
+    runs-on: arc-default-basic-cheap-xs-set
+    defaults:
+      run:
+        working-directory: jenkins-lts
+    concurrency:
+      group: upgrade-jenkins-issue-comment
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9 # v3.5.3
+
+    - name: Check if comment is on jenkins upgrade issue
+      run: |
+
+        if [ "${{ github.event_name }}" == "issue_comment" ]; then
+          echo "This workflow was triggered by an issue comment."
+
+          ISSUE_TITLE='"${{ github.event.issue.title }}"'
+          JENKINS_UPGRADE_TITLE_PATTERN="^\"Jenkins:[^ ]+ upgrade with image:[^ ]+\"$"
+
+          if echo "$ISSUE_TITLE" | grep -Eq "$JENKINS_UPGRADE_TITLE_PATTERN"; then
+            echo "This workflow was triggered from relevant issue comment event."
+          else
+            echo "This workflow was not triggered by a relevant issue comment event.Exiting now."
+            exit 1
+          fi
+        fi
+
+    - name: Check if issue is open
+      env:
+        GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+      run: |
+        ISSUE_STATE=""
+        ISSUE_STATE=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }} \
+          | jq -r '.state')
+        echo "ISSUE_STATE: $ISSUE_STATE"
+        if [ "$ISSUE_STATE" != "open" ]; then
+          echo "Issue should be in open state to run the workflow.Exiting now."
+          exit 1
+        fi
+
+    - name: Check if commenter is authorized approver
+      run: |
+        actor=${{ github.actor }}
+        approvers_list=$(echo $APPROVERS | tr ',' ' ')
+
+        found=false
+        for user in `echo $approvers_list`; do
+          if [ "$user" == "$actor" ]; then
+            found=true
+            break
+          fi
+        done
+
+        if [ "$found" = true ]; then
+          echo "Actor $actor is in the authorized approvers list."
+        else
+          echo "Actor $actor is NOT in the authorized approvers list.Exiting now."
+          echo "Authorized approvers:$APPROVERS"
+          exit 1
+        fi
+
+    - name: check issue comment
+      run: |
+        COMMENT_STATUS=""
+        COMMENT_BODY='"${{ github.event.comment.body }}"'
+        echo "Comment: $COMMENT_BODY"
+        if echo "$COMMENT_BODY" | grep -Eiwq "$APPROVE_KEYWORDS"; then
+          echo "Approved the upgrade.Will proceed with the upgrade."
+          COMMENT_STATUS="accepted"
+        elif echo "$COMMENT_BODY" | grep -Eiwq "$DENY_KEYWORDS"; then
+          echo "Declined the upgrade.Will skip the upgrade and close the issue now."
+          COMMENT_STATUS="denied"
+        else
+          echo "Comment neither accept or deny the upgrade.Ignoring this comment and exiting now."
+          exit 1
+        fi
+
+        echo "COMMENT_STATUS=$COMMENT_STATUS" >> $GITHUB_ENV
+
+    - name: Check jenkins is test or prod instance
+      if: env.COMMENT_STATUS == 'accepted'
+      run: |
+        TEST_JENKINS_UPGRADE='true'
+        ISSUE_TITLE='"${{ github.event.issue.title }}"'
+        PROD_JENKINS_UPGRADE_TITLE_PATTERN="^\"Jenkins:\`(GKE\-CISYSTEM|CI\-FEATURE)\`+ upgrade with image:[^ ]+\"$"
+
+        if echo "$ISSUE_TITLE" | grep -Eq "$PROD_JENKINS_UPGRADE_TITLE_PATTERN"; then
+          TEST_JENKINS_UPGRADE='false'
+        fi
+        echo "TEST_JENKINS_UPGRADE=$TEST_JENKINS_UPGRADE"
+        echo "TEST_JENKINS_UPGRADE=$TEST_JENKINS_UPGRADE" >> $GITHUB_ENV
+
+    - name: Check required label for production jenkins upgrade
+      if: env.COMMENT_STATUS == 'accepted' && env.TEST_JENKINS_UPGRADE == 'false'
+      run: |
+        labels=$(echo '${{ toJson(github.event.issue.labels) }}' | jq -r 'map(.name) | join(" ")')
+        echo "Current Labels on the issue: $labels"
+        label_exists=$(echo $labels | grep -w "$PROD_UPGRADE_REQ_LABEL" || true)
+        if [ ! -n "$label_exists" ]; then
+          echo "Label:$PROD_UPGRADE_REQ_LABEL is required on the issue to proceed for jenkins prod upgrade"
+          echo "Label:$PROD_UPGRADE_REQ_LABEL will automatically be added if test jenkins is upgraded first with the same image"
+          exit 1
+        else
+          echo "Required label:$PROD_UPGRADE_REQ_LABEL exists"
+        fi
+
+    - name: Parse issue description
+      if: env.COMMENT_STATUS == 'accepted'
+      run: |
+        DESCRIPTION='"${{ github.event.issue.body }}"'
+        INPUTS=""
+
+        while IFS= read -r line; do
+          if [[ "$line" == *:* ]]; then
+            KEY=$(echo "$line" | cut -d':' -f1 | xargs)
+            VALUE=$(echo "$line" | cut -d':' -f2 | sed 's/`//g' | xargs)
+            INPUTS="$INPUTS $KEY:$VALUE"
+            echo "$KEY=$VALUE" >> $GITHUB_ENV
+          fi
+        done <<< "$DESCRIPTION"
+        echo "Parsed Inputs: $INPUTS"
+
+    - name: Set variables
+      if: env.COMMENT_STATUS == 'accepted'
+      run: |
+        echo "IMAGE_TAG=${{ env.image_tag }}" >> $GITHUB_ENV
+        echo "RELEASE_NAME=${{ env.release_name }}" >> $GITHUB_ENV
+        echo "CHART_NAME=${{ env.chart_name }}" >> $GITHUB_ENV
+        echo "CHART_VERSION=${{ env.chart_version }}" >> $GITHUB_ENV
+        echo "OVERRIDE_VALUES_FILE=${{ env.override_values_file }}" >> $GITHUB_ENV
+        echo "TARGET_CLUSTER_NAME=${{ env.target_cluster_name }}" >> $GITHUB_ENV
+        echo "TARGET_CLUSTER_PROJECT=${{ env.target_cluster_project }}" >> $GITHUB_ENV
+        echo "TARGET_CLUSTER_REGION=${{ env.target_cluster_region  }}" >> $GITHUB_ENV
+        echo "NAMESPACE=${{ env.namespace }}" >> $GITHUB_ENV
+
+    - name: Trigger upgrade-jenkins-server workflow
+      id: trigger_workflow_upgrade_jenkins_server
+      if: env.COMMENT_STATUS == 'accepted'
+      env:
+        GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+      run: |
+        curl -X POST \
+          -H "Authorization: token $GITHUB_TOKEN" \
+          -H "Accept: application/vnd.github.v3+json" \
+          https://api.github.com/repos/${{ github.repository }}/actions/workflows/upgrade-jenkins-server.yml/dispatches \
+          -d $'{
+            "ref":"develop",
+            "inputs":{
+              "image_tag": "'"$IMAGE_TAG"'",
+              "release_name": "'"$RELEASE_NAME"'",
+              "chart_name": "'"$CHART_NAME"'",
+              "chart_version": "'"$CHART_VERSION"'",
+              "override_values_file": "'"$OVERRIDE_VALUES_FILE"'",
+              "target_cluster_name": "'"$TARGET_CLUSTER_NAME"'",
+              "target_cluster_project": "'"$TARGET_CLUSTER_PROJECT"'",
+              "target_cluster_region": "'"$TARGET_CLUSTER_REGION"'",
+              "namespace": "'"$NAMESPACE"'",
+              "dry_run": "true"
+            }
+          }'
+
+    - name: Wait for upgrade-jenkins-server workflow to Complete
+      id: wait_for_upgrade-jenkins-server_workflow
+      if: env.COMMENT_STATUS == 'accepted'
+      env:
+        GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+      run: |
+        sleep 5
+        response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/runs )
+        #echo "response1:$response"
+
+        run_id=$(echo "$response" | jq -r '.workflow_runs[] | select(.name == "Upgrade-Jenkins-Server") | .id' | head -n 1)
+        echo "run_id:$run_id"
+
+        # Check if the run ID is present
+        if [ -z "$run_id" ]; then
+          echo "No workflow runs found for Workflow Upgrade-Jenkins-Server. Exiting."
+          exit 1
+        fi
+
+        # Get the run details
+        run_details=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/runs/$run_id)
+        created_at=$(echo "$run_details" | jq -r '.created_at')
+        actor=$(echo "$run_details" | jq -r '.actor.login')
+
+        # Check if the run was created less than 1 minute ago
+        created_at_timestamp=$(date -d "$created_at" +%s)
+        current_timestamp=$(date +%s)
+        time_diff=$((current_timestamp - created_at_timestamp))
+        if [ "$time_diff" -gt 30 ]; then
+          echo "The latest run for Workflow B was not created within last 30 sec. Exiting."
+          exit 1
+        fi
+
+        # Check if the run was by the expected actor
+        if [ "$actor" != "${{ env.GITHUB_TOKEN_USER }}" ]; then
+          echo "The latest run for Workflow B was not triggered by the expected actor. Exiting."
+          exit 1
+        fi
+        status="in_progress"
+        while [[ "$status" == "queued" || "$status" == "in_progress" ]]; do
+          sleep 10
+          status=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/runs/$run_id \
+            | jq -r '.status')
+          echo "Workflow B status: $status"
+        done
+        if [ "$status" = "completed" ]; then
+          conclusion=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/runs/$run_id \
+            | jq -r '.conclusion')
+          echo "Workflow B concluded with: $conclusion"
+          if [ "$conclusion" != "success" ]; then
+            echo "Workflow Upgrade-Jenkins-Server failed. Exiting."
+            exit 1
+          fi
+        else
+          echo "Workflow Upgrade-Jenkins-Server did not complete successfully. Exiting."
+          exit 1
+        fi
+
+    - name: Label other issues raised for same image
+      env:
+        GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+      if: env.TEST_JENKINS_UPGRADE == 'true' && env.COMMENT_STATUS == 'accepted'
+      run: |
+        ISSUE_TITLE='"${{ github.event.issue.title }}"'
+        IMAGE_VERSION=$(echo $ISSUE_TITLE | awk -F":" '{print $NF}'| sed 's/`//g' | sed 's/"//g')
+        curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/issues?state=open" > issues.json
+        echo "IMAGE:${IMAGE_VERSION}"
+        matching_issues=$(jq -r '.[]| "\(.number),\(.title)"' issues.json | grep ${IMAGE_VERSION} | awk -F"," '{print $1}' | tr '\n' ' ')
+        echo "Issues to label: ${matching_issues}"
+
+        if [ -n "$matching_issues" ]; then
+          for issue_number in `echo $matching_issues`; do
+            echo "Labeling issue #$issue_number with $PROD_UPGRADE_REQ_LABEL"
+            curl -s -H "Authorization: token $GITHUB_TOKEN" \
+              -X POST \
+              -H "Content-Type: application/json" \
+              -d "{\"labels\":[\"$PROD_UPGRADE_REQ_LABEL\"]}" \
+              "https://api.github.com/repos/${{ github.repository }}/issues/$issue_number/labels"
+          done
+        else
+          echo "No open issues found for jenkins production for image:${IMAGE_VERISON}."
+        fi
+
+    - name: Close the issue
+      env:
+        GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
+      run: |
+        curl -X PATCH \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer $GITHUB_TOKEN" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }} \
+          -d '{"state":"closed"}'

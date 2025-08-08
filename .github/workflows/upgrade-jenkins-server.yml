@@ -1,0 +1,167 @@
+name: Upgrade-Jenkins-Server
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Jenkins image tag'
+        required: true
+        type: string
+      release_name:
+        description: 'Installed release name'
+        required: true
+        type: string
+        default: 'jenkins'
+      chart_name:
+        description: 'Jenkins chart name'
+        required: true
+        type: string
+        default: 'jenkins/jenkins'
+      chart_version:
+        description: 'Helm chart version'
+        required: true
+        type: string
+        default: '4.12.1'
+      override_values_file:
+        description: |
+          Helm chart override values.yaml file name.
+          [jenkins-cisystem-beta:gke-cisystem-beta-values.yaml,
+          jenkins-cisystem:gke-cisystem-values.yaml,
+          ci-feature:gke-ci-feature-values.yaml]
+        required: true
+        type: string
+        default: 'gke-cisystem-beta-values.yaml'
+      target_cluster_name:
+        description: |
+          Kubernetes cluster name.
+          [jenkins-cisystem-beta:test-gke-jenkins-cluster-1,
+          jenkins-cisystem:gke-jenkins-cisystem-cluster,
+          ci-feature:gke-jenkins-cisystem-cluster]
+        required: true
+        type: string
+        default: 'test-gke-jenkins-cluster-1'
+      target_cluster_project:
+        description: 'Kubernetes cluster GCP project'
+        required: true
+        type: string
+        default: 'ns-cicd'
+      target_cluster_region:
+        description: 'Kubernetes cluster region'
+        required: true
+        type: string
+        default: 'us-west1'
+      namespace:
+        description: |
+          Kubernetes namespace where jenkins is installed.
+          [jenkins-cisystem-beta:jenkins-lts,
+          jenkins-cisystem:jenkins-lts,
+          ci-feature:jenkins-ci-feature]
+        required: true
+        type: string
+        default: 'jenkins-lts'
+      dry_run:
+        description: 'Dry run?'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  SLACK_CHANNEL_ID: "C047N1KES5N" #secondary-alerts
+jobs:
+  upgrade_jenkins_server:
+    runs-on: arc-default-basic-cheap-xs-set
+    defaults:
+      run:
+        working-directory: jenkins-lts
+    concurrency:
+      group: upgrade-jenkins
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9 # v3.5.3
+
+    - name: Set variables
+      run: |
+        echo "IMAGE_TAG=${{ github.event.inputs.image_tag }}" >> $GITHUB_ENV
+        echo "RELEASE_NAME=${{ github.event.inputs.release_name }}" >> $GITHUB_ENV
+        echo "CHART_NAME=${{ github.event.inputs.chart_name }}" >> $GITHUB_ENV
+        echo "CHART_VERSION=${{ github.event.inputs.chart_version }}" >> $GITHUB_ENV
+        echo "OVERRIDE_VALUES_FILE=${{ github.event.inputs.override_values_file }}" >> $GITHUB_ENV
+        echo "TARGET_CLUSTER_NAME=${{ github.event.inputs.target_cluster_name }}" >> $GITHUB_ENV
+        echo "TARGET_CLUSTER_PROJECT=${{ github.event.inputs.target_cluster_project }}" >> $GITHUB_ENV
+        echo "TARGET_CLUSTER_REGION=${{ github.event.inputs.target_cluster_region }}" >> $GITHUB_ENV
+        echo "NAMESPACE=${{ github.event.inputs.namespace }}" >> $GITHUB_ENV
+
+    - name: Connect to K8S cluster
+      env:
+        GCP_SA_KEY: ${{ secrets.JENKINS_NS_CICD_SA_KEY }}
+      run: |
+        echo "${GCP_SA_KEY}" > gcp-sa-key.json
+        gcloud auth activate-service-account --key-file gcp-sa-key.json
+        gcloud container clusters get-credentials ${{ env.TARGET_CLUSTER_NAME }} \
+          --region ${{ env.TARGET_CLUSTER_REGION }} \
+          --project ${{ env.TARGET_CLUSTER_PROJECT}}
+        kubectl cluster-info
+        kubectl config set-context --current --namespace=${{ env.NAMESPACE}}
+
+    - name: Helm setup
+      run: |
+        helm repo add jenkins https://charts.jenkins.io
+        helm repo update
+
+    - name: Upgrade jenkins
+      id: helm_upgrade
+      run: |
+        if [[ "${{ github.event.inputs.DRY_RUN }}" == "true" ]]; then
+          echo "Performing dry run"
+          DRY_RUN_FLAG="--dry-run"
+        else
+          echo "Performing actual upgrade"
+          DRY_RUN_FLAG=""
+        fi
+
+        if [ -z "${{ github.event.inputs.image_tag }}" ]; then
+          echo "Upgrading jenkins with no image change"
+          helm upgrade --wait --timeout 600s --install ${{ env.RELEASE_NAME }} ${{ env.CHART_NAME }} \
+            -f ${{ env.OVERRIDE_VALUES_FILE }} --version ${{ env.CHART_VERSION }} $DRY_RUN_FLAG
+        else
+          echo "Upgrading jenkins with image: ${{ env.IMAGE_TAG }}"
+          helm upgrade --wait --timeout 600s --install ${{ env.RELEASE_NAME }} ${{ env.CHART_NAME }} \
+            -f ${{ env.OVERRIDE_VALUES_FILE }} --version ${{ env.CHART_VERSION }} \
+            --set controller.tag=${{ env.IMAGE_TAG }} $DRY_RUN_FLAG
+        fi
+
+    - name: Send upgrade notification to Slack
+      if: always()
+      env:
+        BOT_TOKEN: ${{ secrets.SLACK_TOKEN }}
+      run: |
+        WORKFLOW_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        if [ "${{ steps.helm_upgrade.outcome }}" == "success" ]; then
+          MESSAGE=":bell: *Jenkins has been upgraded successfully in \`${{ env.TARGET_CLUSTER_NAME }}\` cluster in \`${{ env.NAMESPACE}}\` namespace.*\n\n"
+        else
+          MESSAGE=":red_alert: *Jenkins upgrade failed in \`${{ env.TARGET_CLUSTER_NAME }}\` cluster in \`${{ env.NAMESPACE}}\` namespace.*\n\n"
+        fi
+        MESSAGE+="Github Workflow Run ID: <$WORKFLOW_URL|${{ github.run_id }}>"
+        if [ ! -z "${{ github.event.inputs.image_tag }}" ]; then
+          MESSAGE+="\nImage Tag:\`${{ env.IMAGE_TAG }}\`"
+        fi
+
+        MESSAGE+="\nDry Run :\`${{ github.event.inputs.DRY_RUN }}\`"
+
+        payload=$(cat <<EOF
+        {
+            "channel": "$SLACK_CHANNEL_ID",
+            "text": "$MESSAGE"
+        }
+        EOF
+        )
+        response=$(curl -s -X POST -H "Authorization: Bearer $BOT_TOKEN" -H "Content-type: application/json" \
+            --data "$payload" \
+            https://slack.com/api/chat.postMessage)
+
+    - name: Cleanup
+      if: always()
+      run: |
+        gcloud auth revoke
+        rm -f gcp-sa-key.json
+
